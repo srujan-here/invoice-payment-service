@@ -1,0 +1,350 @@
+openapi: 3.1.0
+info:
+  title: Invoice & Payment Service
+  version: 0.1.0
+  description: >
+    Minimal billing backend. All endpoints except /healthz require an API key via
+    `Authorization: Bearer <key>` and are scoped to that key's business. Money is
+    integer USD cents. Errors share a single envelope (see Error schema).
+servers:
+  - url: http://localhost:8080
+
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness check
+      security: []
+      responses:
+        "200": { description: ok }
+
+  /v1/api-keys:
+    post:
+      summary: Create an API key (secret returned once)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                env: { type: string, enum: [test, live], default: test }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  prefix: { type: string }
+                  key: { type: string, description: full secret, shown once }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    get:
+      summary: List API keys (no secrets)
+      responses:
+        "200": { description: OK }
+
+  /v1/api-keys/{id}:
+    delete:
+      summary: Revoke an API key
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "204": { description: Revoked }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/customers:
+    post:
+      summary: Create a customer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                email: { type: string }
+      responses:
+        "201":
+          description: Created
+          content: { application/json: { schema: { $ref: "#/components/schemas/Customer" } } }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Validation" }
+    get:
+      summary: List customers (keyset paginated)
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/CustomerPage" } } } }
+
+  /v1/customers/{id}:
+    get:
+      summary: Get a customer
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Customer" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/invoices:
+    post:
+      summary: Create an invoice (server computes the total; client total is ignored)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateInvoice" }
+      responses:
+        "201":
+          description: Created (state=draft)
+          content: { application/json: { schema: { $ref: "#/components/schemas/Invoice" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Validation" }
+    get:
+      summary: List invoices, filterable by state (keyset paginated)
+      parameters:
+        - name: state
+          in: query
+          schema: { type: string, enum: [draft, open, paid, void, uncollectible] }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { description: OK }
+
+  /v1/invoices/{id}:
+    get:
+      summary: Get an invoice (with line items)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Invoice" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/invoices/{id}/finalize:
+    post:
+      summary: Finalize (draft -> open)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: OK }
+        "409": { $ref: "#/components/responses/Conflict", description: "invalid_state_transition" }
+
+  /v1/invoices/{id}/void:
+    post:
+      summary: Void (draft|open -> void)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: OK }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/invoices/{id}/mark_uncollectible:
+    post:
+      summary: Write off (open -> uncollectible)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200": { description: OK }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/invoices/{id}/pay:
+    post:
+      summary: Attempt payment (idempotent)
+      description: >
+        Requires the `Idempotency-Key` header. Returns 200 on success, 402 on a
+        decline (invoice stays open, retryable), or 202 when the PSP outcome is
+        unknown (timeout/network) — the attempt is pending and resolved by the
+        reconciler; poll the returned poll_url.
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [card_token]
+              properties:
+                card_token:
+                  type: string
+                  example: tok_success
+      responses:
+        "200": { description: Succeeded, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentAttempt" } } } }
+        "202": { description: Pending (unknown PSP outcome), content: { application/json: { schema: { $ref: "#/components/schemas/PaymentAttempt" } } } }
+        "402": { description: Declined, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentAttempt" } } } }
+        "409": { $ref: "#/components/responses/Conflict", description: "payment_in_progress | invoice_not_payable | idempotency_key_reuse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/invoices/{id}/payments/{attempt_id}:
+    get:
+      summary: Get a payment attempt (poll for a pending result)
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - name: attempt_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentAttempt" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/webhook-endpoints:
+    post:
+      summary: Register a webhook endpoint (signing secret returned once)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string }
+                event_types:
+                  type: array
+                  items: { type: string }
+                  description: empty = all event types
+      responses:
+        "201": { description: Created }
+
+  /v1/events:
+    get:
+      summary: List emitted events (reconciliation source of truth)
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { description: OK }
+
+  /v1/webhook-deliveries:
+    get:
+      summary: List delivery attempts (status, attempts, last error)
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [pending, in_flight, succeeded, failed, dead] }
+      responses:
+        "200": { description: OK }
+
+  /v1/webhook-deliveries/{id}/redeliver:
+    post:
+      summary: Manually re-queue a failed/dead delivery
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "202": { description: Re-queued }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid API key
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    NotFound:
+      description: Resource not found
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Conflict:
+      description: Conflict (state transition, idempotency, or active payment)
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Validation:
+      description: Validation error
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string, example: invoice_not_payable }
+            type: { type: string, example: invalid_request_error }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  issue: { type: string }
+    Customer:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, nullable: true }
+        name: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    CustomerPage:
+      type: object
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/Customer" } }
+        next_cursor: { type: string, nullable: true }
+    CreateInvoice:
+      type: object
+      required: [customer_id, line_items]
+      properties:
+        customer_id: { type: string, format: uuid }
+        line_items:
+          type: array
+          items:
+            type: object
+            required: [description, quantity, unit_amount_cents]
+            properties:
+              description: { type: string }
+              quantity: { type: integer, minimum: 1 }
+              unit_amount_cents: { type: integer, minimum: 0 }
+    Invoice:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        customer_id: { type: string, format: uuid }
+        state: { type: string, enum: [draft, open, paid, void, uncollectible] }
+        currency: { type: string, example: USD }
+        total_cents: { type: integer, description: server-computed }
+        line_items:
+          type: array
+          items:
+            type: object
+            properties:
+              description: { type: string }
+              quantity: { type: integer }
+              unit_amount_cents: { type: integer }
+              amount_cents: { type: integer }
+        finalized_at: { type: string, format: date-time, nullable: true }
+        paid_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+    PaymentAttempt:
+      type: object
+      properties:
+        attempt_id: { type: string, format: uuid }
+        invoice_id: { type: string, format: uuid }
+        status: { type: string, enum: [pending, succeeded, failed, expired] }
+        amount_cents: { type: integer }
+        invoice_state: { type: string }
+        psp_ref: { type: string, nullable: true }
+        failure_code: { type: string, nullable: true }
+        message: { type: string, nullable: true }
+        poll_url: { type: string, nullable: true }

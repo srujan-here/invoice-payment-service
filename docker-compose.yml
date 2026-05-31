@@ -1,0 +1,58 @@
+# One-command setup: `docker compose up` brings up the database, the mock PSP,
+# and the invoice service with migrations applied automatically. No manual steps.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dodo
+      POSTGRES_PASSWORD: dodo
+      POSTGRES_DB: dodo
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dodo -d dodo"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  mock-psp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["mock-psp"]
+    environment:
+      MOCK_PSP_BIND_ADDR: 0.0.0.0:9090
+      RUST_LOG: info,mock_psp=debug
+    ports:
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/9090 && echo done"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["invoice-service"]
+    depends_on:
+      db:
+        condition: service_healthy
+      mock-psp:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgres://dodo:dodo@db:5432/dodo
+      BIND_ADDR: 0.0.0.0:8080
+      PSP_BASE_URL: http://mock-psp:9090
+      PSP_TIMEOUT_MS: "5000"
+      WEBHOOK_MAX_ATTEMPTS: "8"
+      RUST_LOG: info,invoice_service=debug,tower_http=info
+    ports:
+      - "8080:8080"
+
+volumes:
+  db_data:
