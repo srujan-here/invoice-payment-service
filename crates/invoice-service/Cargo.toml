@@ -1,0 +1,44 @@
+[package]
+name = "invoice-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "invoice-service"
+path = "src/main.rs"
+
+[lib]
+name = "invoice_service"
+path = "src/lib.rs"
+
+[dependencies]
+common = { path = "../common" }
+axum.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+sqlx.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+serde_json = "1"
+axum = "0.7"
+uuid = { version = "1", features = ["v7", "serde"] }
+futures = "0.3"
